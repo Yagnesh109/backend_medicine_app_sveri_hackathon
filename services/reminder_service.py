@@ -14,8 +14,9 @@ from services.secure_store_service import (
 
 TWILIO_ACCOUNT_SID = getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = getenv("TWILIO_AUTH_TOKEN")
-TWILIO_FROM_NUMBER = getenv("TWILIO_FROM_NUMBER")
+TWILIO_FROM_NUMBER = getenv("TWILIO_FROM_NUMBER") or getenv("TWILIO_PHONE_NUMBER")
 APP_TIMEZONE = getenv("APP_TIMEZONE", "Asia/Kolkata")
+DEFAULT_COUNTRY_CODE = getenv("DEFAULT_COUNTRY_CODE", "+91")
 
 
 def _twilio_ready():
@@ -25,7 +26,21 @@ def _twilio_ready():
 def _normalize_phone(phone):
     if not phone:
         return ""
-    value = str(phone).strip().replace(" ", "")
+    value = str(phone).strip().replace(" ", "").replace("-", "")
+
+    # Already E.164-like.
+    if value.startswith("+"):
+        return value
+
+    # India local format: 10-digit mobile => +91XXXXXXXXXX
+    if value.isdigit() and len(value) == 10:
+        return f"{DEFAULT_COUNTRY_CODE}{value}"
+
+    # 91XXXXXXXXXX => +91XXXXXXXXXX
+    if value.isdigit() and len(value) == 12 and value.startswith("91"):
+        return f"+{value}"
+
+    # Keep fallback as-is (Twilio may reject invalid format).
     return value
 
 
