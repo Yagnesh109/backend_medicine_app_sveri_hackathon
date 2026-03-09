@@ -1,0 +1,45 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+.envrc
+*.env.local
+*.env.production
+*.env.development
+*serviceAccount*.json
+serviceAccountKey.json
+firebase-adminsdk-*.json
+*credentials*.json
+*secret*.json
+credentials.json
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.keystore
+*.crt
+*.cer
+*_rsa
+*id_rsa
+
+# Python cache / venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Logs and local DB
+*.log
+*.sqlite3
+*.db
+
+# IDE / OS and local artifacts
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.zip

@@ -1,0 +1,115 @@
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI
+from fastapi import File, UploadFile
+from fastapi import Header, HTTPException
+from apscheduler.schedulers.background import BackgroundScheduler
+from pydantic import BaseModel
+from os import getenv
+
+load_dotenv()
+
+from services.medicine_service import get_medicine, get_medicine_by_barcode
+from services.ocr_service import extract_medicine_details_from_image
+from services.secure_store_service import (
+    get_current_user,
+    get_recent_reminder_logs,
+    get_user_profile,
+    list_medicines,
+    save_medicine,
+    set_user_phone,
+    set_user_role,
+)
+from services.reminder_service import run_due_reminders
+
+app = FastAPI()
+scheduler = BackgroundScheduler()
+
+REMINDER_TRIGGER_KEY = getenv("REMINDER_TRIGGER_KEY", "")
+
+
+class RolePayload(BaseModel):
+    role: str
+
+
+class MedicinePayload(BaseModel):
+    medicineName: str
+    dosage: str
+    startDate: str
+    endDate: str
+    timeHour: int
+    timeMinute: int
+    mealType: str
+    mealRelation: str
+    source: str | None = None
+
+
+class PhonePayload(BaseModel):
+    phoneNumber: str
+
+@app.get("/medicine")
+def medicine(name: str):
+    return get_medicine(name)
+
+@app.get("/medicine/barcode")
+def medicine_by_barcode(code: str):
+    return get_medicine_by_barcode(code)
+
+@app.post("/medicine/extract-ocr")
+async def extract_medicine_ocr(file: UploadFile = File(...)):
+    image_bytes = await file.read()
+    if not image_bytes:
+        return {"error": "Empty image file."}
+    return extract_medicine_details_from_image(image_bytes, file.content_type)
+
+
+@app.get("/secure/user/profile")
+def secure_user_profile(user=Depends(get_current_user)):
+    return get_user_profile(user)
+
+
+@app.post("/secure/user/role")
+def secure_user_role(payload: RolePayload, user=Depends(get_current_user)):
+    return set_user_role(user, payload.role)
+
+
+@app.post("/secure/user/phone")
+def secure_user_phone(payload: PhonePayload, user=Depends(get_current_user)):
+    return set_user_phone(user, payload.phoneNumber)
+
+
+@app.post("/secure/medicine")
+def secure_save_medicine(payload: MedicinePayload, user=Depends(get_current_user)):
+    return save_medicine(user, payload.model_dump())
+
+
+@app.get("/secure/medicines")
+def secure_list_medicines(user=Depends(get_current_user)):
+    return list_medicines(user)
+
+
+@app.post("/secure/reminders/run")
+def secure_run_reminders(x_trigger_key: str = Header(default="")):
+    if REMINDER_TRIGGER_KEY and x_trigger_key != REMINDER_TRIGGER_KEY:
+        raise HTTPException(status_code=401, detail="Invalid reminder trigger key")
+    return run_due_reminders()
+
+
+@app.get("/secure/reminders/logs")
+def secure_reminder_logs(limit: int = 50, x_trigger_key: str = Header(default="")):
+    if REMINDER_TRIGGER_KEY and x_trigger_key != REMINDER_TRIGGER_KEY:
+        raise HTTPException(status_code=401, detail="Invalid reminder trigger key")
+    safe_limit = max(1, min(limit, 200))
+    return {"items": get_recent_reminder_logs(safe_limit)}
+
+
+@app.on_event("startup")
+def start_scheduler():
+    if not scheduler.running:
+        scheduler.add_job(run_due_reminders, "interval", minutes=1, id="sms-reminders")
+        scheduler.start()
+
+
+@app.on_event("shutdown")
+def shutdown_scheduler():
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
