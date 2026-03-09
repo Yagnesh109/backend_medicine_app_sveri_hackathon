@@ -1,6 +1,7 @@
 from datetime import datetime
 from os import getenv
 from zoneinfo import ZoneInfo
+from xml.sax.saxutils import escape
 
 from twilio.base.exceptions import TwilioException
 from twilio.rest import Client
@@ -17,6 +18,11 @@ TWILIO_AUTH_TOKEN = getenv("TWILIO_AUTH_TOKEN")
 TWILIO_FROM_NUMBER = getenv("TWILIO_FROM_NUMBER") or getenv("TWILIO_PHONE_NUMBER")
 APP_TIMEZONE = getenv("APP_TIMEZONE", "Asia/Kolkata")
 DEFAULT_COUNTRY_CODE = getenv("DEFAULT_COUNTRY_CODE", "+91")
+TWILIO_ENABLE_CALL_REMINDERS = getenv("TWILIO_ENABLE_CALL_REMINDERS", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 def _twilio_ready():
@@ -83,6 +89,39 @@ def _build_message(medicine):
     )
 
 
+def _build_voice_message(medicine):
+    medicine_name = str(medicine.get("medicineName") or "your medicine").strip()
+    dosage = str(medicine.get("dosage") or "").strip()
+    hour = medicine.get("timeHour")
+    minute = medicine.get("timeMinute")
+    time_text = ""
+    if hour is not None and minute is not None:
+        time_text = f"{hour:02d}:{minute:02d}"
+
+    if dosage and time_text:
+        return (
+            f"Hey, this is a reminder call from MediMind. "
+            f"Take {medicine_name}, dosage {dosage}, at {time_text} time. "
+            "Stay healthy and take care."
+        )
+    if dosage:
+        return (
+            f"Hey, this is a reminder call from MediMind. "
+            f"Take {medicine_name}, dosage {dosage}. "
+            "Stay healthy and take care."
+        )
+    return (
+        f"Hey, this is a reminder call from MediMind. "
+        f"Take {medicine_name} medicine. "
+        "Stay healthy and take care."
+    )
+
+
+def _to_twiml_say(message):
+    escaped = escape(message)
+    return f"<Response><Say voice=\"alice\">{escaped}</Say></Response>"
+
+
 def run_due_reminders():
     if not _twilio_ready():
         return {
@@ -97,6 +136,7 @@ def run_due_reminders():
     minute_key = now.strftime("%H%M")
 
     sent = 0
+    calls = 0
     skipped = 0
     errors = []
 
@@ -123,12 +163,25 @@ def run_due_reminders():
                 continue
 
             message_body = _build_message(medicine)
+            voice_body = _build_voice_message(medicine)
             try:
                 msg = client.messages.create(
                     body=message_body,
                     from_=TWILIO_FROM_NUMBER,
                     to=phone,
                 )
+                call_sid = None
+                call_status = None
+                if TWILIO_ENABLE_CALL_REMINDERS:
+                    call = client.calls.create(
+                        twiml=_to_twiml_say(voice_body),
+                        from_=TWILIO_FROM_NUMBER,
+                        to=phone,
+                    )
+                    call_sid = call.sid
+                    call_status = call.status
+                    calls += 1
+
                 mark_reminder_sent(
                     log_id,
                     {
@@ -137,6 +190,8 @@ def run_due_reminders():
                         "phoneNumber": phone,
                         "twilioSid": msg.sid,
                         "status": msg.status,
+                        "voiceSid": call_sid,
+                        "voiceStatus": call_status,
                         "scheduledDate": now.strftime("%Y-%m-%d"),
                         "scheduledTime": now.strftime("%H:%M"),
                     },
@@ -156,6 +211,7 @@ def run_due_reminders():
     return {
         "ok": True,
         "sent": sent,
+        "calls": calls,
         "skipped": skipped,
         "errors": errors[:10],
         "checkedAt": now.isoformat(),
