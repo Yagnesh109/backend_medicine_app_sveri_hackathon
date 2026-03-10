@@ -303,21 +303,48 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
                 text_part += part["text"]
 
         parsed = _extract_json_from_text(text_part)
-        if not parsed or not isinstance(parsed, dict):
+        if not parsed:
             last_error = (
                 "Could not parse structured JSON from Gemini response "
                 f"({api_version}/{model_to_use})."
             )
             continue
 
+        def _normalize_item(item):
+            return {
+                "medicineName": str(item.get("medicineName", "")).strip(),
+                "dosage": str(item.get("dosage", "")).strip(),
+                "startDate": str(item.get("startDate", "")).strip(),
+                "endDate": str(item.get("endDate", "")).strip(),
+                "time": str(item.get("time", "")).strip(),
+                "mealType": str(item.get("mealType", "")).strip(),
+                "mealRelation": str(item.get("mealRelation", "")).strip(),
+            }
+
+        items = []
+        if isinstance(parsed, list):
+            items = [_normalize_item(x) for x in parsed if isinstance(x, dict)]
+        elif isinstance(parsed, dict) and isinstance(parsed.get("medicines"), list):
+            items = [
+                _normalize_item(x)
+                for x in parsed.get("medicines")
+                if isinstance(x, dict)
+            ]
+        elif isinstance(parsed, dict):
+            items = [_normalize_item(parsed)]
+
+        if not items:
+            last_error = (
+                "Parsed JSON but no medicine items were found "
+                f"({api_version}/{model_to_use})."
+            )
+            continue
+
+        # For backward compatibility keep top-level single fields (first item).
+        first = items[0]
         return {
-            "medicineName": str(parsed.get("medicineName", "")).strip(),
-            "dosage": str(parsed.get("dosage", "")).strip(),
-            "startDate": str(parsed.get("startDate", "")).strip(),
-            "endDate": str(parsed.get("endDate", "")).strip(),
-            "time": str(parsed.get("time", "")).strip(),
-            "mealType": str(parsed.get("mealType", "")).strip(),
-            "mealRelation": str(parsed.get("mealRelation", "")).strip(),
+            **first,
+            "items": items,
         }
 
     return {
