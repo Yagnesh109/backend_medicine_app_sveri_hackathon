@@ -52,18 +52,32 @@ def _normalize_phone(phone):
 
 
 def _is_due_today(medicine, now):
+    """
+    Returns True if:
+      - today is within [startDate, endDate] (inclusive). If endDate missing, treat it as startDate.
+      - AND current hour/minute match the scheduled time.
+    Missing dates or bad formats return False.
+    """
     start_date = str(medicine.get("startDate") or "").strip()
     end_date = str(medicine.get("endDate") or "").strip()
-    if not start_date or not end_date:
+
+    if not start_date:
         return False
 
-    today = now.date()
     try:
         start = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end = datetime.strptime(end_date, "%Y-%m-%d").date()
     except ValueError:
         return False
 
+    if end_date:
+        try:
+            end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            end = start
+    else:
+        end = start
+
+    today = now.date()
     if today < start or today > end:
         return False
 
