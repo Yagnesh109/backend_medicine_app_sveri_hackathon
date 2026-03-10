@@ -5,7 +5,7 @@ from os import getenv
 import requests
 
 GEMINI_API_KEY = getenv("GEMINI_API_KEY")
-GEMINI_MODEL = getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_API_VERSION = getenv("GEMINI_API_VERSION", "v1").strip() or "v1"
 
 
@@ -80,6 +80,7 @@ def _pick_fallback_model(available, preferred):
     # Common model aliases across versions; we'll pick the first one that exists.
     preference_order = [
         preferred_value,
+        "gemini-2.5-flash",
         "gemini-1.5-flash-latest",
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
