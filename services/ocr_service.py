@@ -1,5 +1,6 @@
 import base64
 import json
+import mimetypes
 from os import getenv
 
 import requests
@@ -106,6 +107,17 @@ def _post_gemini_generate(api_version, model, api_key, payload):
     return response
 
 
+def _normalized_mime_type(mime_type, filename=None):
+    if mime_type and mime_type.startswith("image/"):
+        return mime_type
+    if filename:
+        guessed, _ = mimetypes.guess_type(filename)
+        if guessed and guessed.startswith("image/"):
+            return guessed
+    # Gemini expects a concrete image mime type; fall back to jpeg.
+    return "image/jpeg"
+
+
 def extract_medicine_details_from_image(image_bytes, mime_type):
     if not GEMINI_API_KEY:
         return {"error": "GEMINI_API_KEY is not configured on backend."}
@@ -121,6 +133,7 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
         "Use empty string for unavailable fields."
     )
 
+    safe_mime = _normalized_mime_type(mime_type)
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     payload = {
         "contents": [
@@ -129,7 +142,7 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
                     {"text": prompt},
                     {
                         "inline_data": {
-                            "mime_type": mime_type or "image/jpeg",
+                            "mime_type": safe_mime,
                             "data": image_b64,
                         }
                     },
