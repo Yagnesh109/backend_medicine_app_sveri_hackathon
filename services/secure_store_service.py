@@ -1,4 +1,6 @@
 import json
+import secrets
+import string
 from os import getenv
 from pathlib import Path
 
@@ -188,6 +190,25 @@ def _is_caregiver_linked_to_patient(caregiver_id, patient_id):
     return _db.collection("caregiver_patient_links").document(link_id).get().exists
 
 
+def _build_temp_password(length=20):
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _get_or_create_patient_auth_user(email):
+    try:
+        return auth.get_user_by_email(email), False
+    except auth.UserNotFoundError:
+        # Create an auth user so caregivers can onboard patients who have not signed up yet.
+        display_name = email.split("@", 1)[0] if "@" in email else "Patient"
+        created_user = auth.create_user(
+            email=email,
+            password=_build_temp_password(),
+            display_name=display_name,
+        )
+        return created_user, True
+
+
 def save_medicine(user, payload):
     target_patient_id = str(payload.get("targetPatientId") or "").strip()
     owner_user_id = user["uid"]
@@ -198,6 +219,15 @@ def save_medicine(user, payload):
             return {"error": "Only caregiver can save medicine for another patient."}
         if not _is_caregiver_linked_to_patient(user["uid"], target_patient_id):
             return {"error": "Selected patient is not linked to this caregiver."}
+
+        link_id = f"{user['uid']}_{target_patient_id}"
+        _db.collection("caregiver_patient_links").document(link_id).set(
+            {
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+                "lastMedicineSavedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
         owner_user_id = target_patient_id
 
     encrypted_payload = _encrypt_payload(payload)
@@ -299,9 +329,9 @@ def add_patient_for_caregiver(user, patient_email, patient_phone):
         return {"error": "Patient email is required."}
 
     try:
-        patient_auth = auth.get_user_by_email(email)
-    except Exception:
-        return {"error": "No Firebase user found with this patient email."}
+        patient_auth, was_auto_created = _get_or_create_patient_auth_user(email)
+    except Exception as exc:
+        return {"error": f"Unable to add patient in Firebase: {exc}"}
 
     patient_id = patient_auth.uid
     if patient_id == user["uid"]:
@@ -344,6 +374,7 @@ def add_patient_for_caregiver(user, patient_email, patient_phone):
 
     return {
         "ok": True,
+        "wasAutoCreatedInAuth": was_auto_created,
         "patient": {
             "userId": patient_id,
             "email": payload.get("email"),
@@ -365,12 +396,18 @@ def list_caregiver_patients(user):
         .stream()
     )
 
-    items = []
+    patient_rows = []
     for link in links:
         link_data = link.to_dict()
         patient_id = link_data.get("patientId")
         if not patient_id:
             continue
+        updated_at = link_data.get("updatedAt")
+        sort_key = updated_at.timestamp() if hasattr(updated_at, "timestamp") else 0.0
+        patient_rows.append((sort_key, patient_id))
+
+    items = []
+    for _, patient_id in sorted(patient_rows, key=lambda row: row[0], reverse=True):
         patient_profile = _get_user_profile_by_uid(patient_id)
         if not patient_profile:
             continue
