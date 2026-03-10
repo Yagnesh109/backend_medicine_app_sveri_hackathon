@@ -20,6 +20,7 @@ from services.secure_store_service import (
     get_user_profile,
     list_caregiver_patients,
     list_medicines,
+    list_today_medicine_summary,
     list_today_pending_medicines,
     mark_medicine_taken,
     save_medicine,
@@ -127,6 +128,11 @@ def secure_list_medicines(user=Depends(get_current_user)):
 @app.get("/secure/medicines/pending-today")
 def secure_list_today_pending_medicines(user=Depends(get_current_user)):
     return list_today_pending_medicines(user)
+
+
+@app.get("/secure/medicines/today-summary")
+def secure_list_today_medicine_summary(user=Depends(get_current_user)):
+    return list_today_medicine_summary(user)
 
 
 @app.post("/secure/medicines/{medicine_id}/taken")

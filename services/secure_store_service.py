@@ -595,6 +595,66 @@ def list_today_pending_medicines(user):
     return {"items": items}
 
 
+def list_today_medicine_summary(user):
+    profile = get_user_profile(user)
+    role = str(profile.get("role") or "").strip()
+    if role != "Patient":
+        return {"pendingCount": 0, "items": []}
+
+    now = _app_now()
+    target_date = now.date()
+    scheduled_date = target_date.strftime("%Y-%m-%d")
+    _mark_missed_doses_for_user(user["uid"], now)
+    today_status_map = _get_status_map_for_user_on_date(user["uid"], scheduled_date)
+
+    items = []
+    pending_count = 0
+    medicines = get_user_medicines_decrypted(user["uid"])
+    for medicine in medicines:
+        medicine_id = str(medicine.get("id") or "").strip()
+        if not medicine_id:
+            continue
+        if not _is_medicine_active_on_date(medicine, target_date):
+            continue
+
+        hour = _safe_int(medicine.get("timeHour"))
+        minute = _safe_int(medicine.get("timeMinute"))
+        if hour is None or minute is None:
+            continue
+
+        scheduled = _get_scheduled_datetime_for_date(medicine, target_date)
+        if scheduled is None:
+            continue
+        window_end = scheduled + timedelta(minutes=DOSE_PENDING_WINDOW_MINUTES)
+
+        status = str(today_status_map.get(medicine_id) or "").strip()
+        display_status = status if status in {"Taken", "Missed"} else "Pending"
+        can_take_now = (status == "") and (scheduled <= now <= window_end)
+        if display_status == "Pending":
+            pending_count += 1
+
+        items.append(
+            {
+                "medicineId": medicine_id,
+                "medicineName": medicine.get("medicineName"),
+                "dosage": medicine.get("dosage"),
+                "startDate": medicine.get("startDate"),
+                "timeHour": hour,
+                "timeMinute": minute,
+                "status": display_status,
+                "canTakeNow": can_take_now,
+            }
+        )
+
+    items.sort(
+        key=lambda item: (
+            _safe_int(item.get("timeHour")) or 0,
+            _safe_int(item.get("timeMinute")) or 0,
+        )
+    )
+    return {"pendingCount": pending_count, "items": items}
+
+
 def mark_medicine_taken(user, medicine_id):
     profile = get_user_profile(user)
     role = str(profile.get("role") or "").strip()
