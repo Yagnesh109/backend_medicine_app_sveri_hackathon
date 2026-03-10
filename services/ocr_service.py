@@ -125,9 +125,18 @@ def _call_openrouter(prompt, image_b64, mime_type):
     if OPENROUTER_TITLE:
         headers["X-Title"] = OPENROUTER_TITLE
 
+    # Ask explicitly for JSON only.
+    system_prompt = (
+        "You are an OCR parser. Given an image of a prescription or medicine label, "
+        "return ONLY a compact JSON object with keys: "
+        "medicineName, dosage, startDate, endDate, time, mealType, mealRelation. "
+        "Do not include code fences or extra text."
+    )
+
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": [
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": [
@@ -141,6 +150,8 @@ def _call_openrouter(prompt, image_b64, mime_type):
         ],
         "temperature": 0.2,
         "max_tokens": 512,
+        # JSON mode if supported by the model.
+        "response_format": {"type": "json_object"},
     }
 
     try:
