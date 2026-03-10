@@ -8,6 +8,10 @@ import requests
 GEMINI_API_KEY = getenv("GEMINI_API_KEY")
 GEMINI_MODEL = getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_API_VERSION = getenv("GEMINI_API_VERSION", "v1").strip() or "v1"
+OPENROUTER_API_KEY = getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash")
+OPENROUTER_REFERRER = getenv("OPENROUTER_REFERRER", "")
+OPENROUTER_TITLE = getenv("OPENROUTER_TITLE", "MediMind OCR")
 
 
 def _extract_json_from_text(text):
@@ -108,6 +112,74 @@ def _post_gemini_generate(api_version, model, api_key, payload):
     return response
 
 
+def _call_openrouter(prompt, image_b64, mime_type):
+    if not OPENROUTER_API_KEY:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_REFERRER:
+        headers["HTTP-Referer"] = OPENROUTER_REFERRER
+    if OPENROUTER_TITLE:
+        headers["X-Title"] = OPENROUTER_TITLE
+
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
+                    },
+                ],
+            }
+        ],
+        "temperature": 0.2,
+        "max_tokens": 512,
+    }
+
+    try:
+        res = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=45,
+        )
+    except requests.RequestException as exc:
+        return {"error": f"OpenRouter request failed: {exc}"}
+
+    if res.status_code != 200:
+        return {"error": f"OpenRouter error {res.status_code}: {res.text}"}
+
+    try:
+        data = res.json()
+    except Exception:
+        return {"error": "OpenRouter response not valid JSON."}
+
+    choices = data.get("choices") or []
+    if not choices:
+        return {"error": "OpenRouter returned no choices."}
+    content = choices[0].get("message", {}).get("content", "")
+    parsed = _extract_json_from_text(content)
+    if not parsed or not isinstance(parsed, dict):
+        return {"error": "Could not parse structured JSON from OpenRouter response."}
+
+    return {
+        "medicineName": str(parsed.get("medicineName", "")).strip(),
+        "dosage": str(parsed.get("dosage", "")).strip(),
+        "startDate": str(parsed.get("startDate", "")).strip(),
+        "endDate": str(parsed.get("endDate", "")).strip(),
+        "time": str(parsed.get("time", "")).strip(),
+        "mealType": str(parsed.get("mealType", "")).strip(),
+        "mealRelation": str(parsed.get("mealRelation", "")).strip(),
+    }
+
+
 def _normalized_mime_type(mime_type, filename=None):
     if mime_type and mime_type.startswith("image/"):
         return mime_type
@@ -120,8 +192,7 @@ def _normalized_mime_type(mime_type, filename=None):
 
 
 def extract_medicine_details_from_image(image_bytes, mime_type):
-    if not GEMINI_API_KEY:
-        return {"error": "GEMINI_API_KEY is not configured on backend."}
+    safe_mime = _normalized_mime_type(mime_type)
 
     prompt = (
         "Extract medicine schedule information from this prescription/medicine image. "
@@ -134,8 +205,18 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
         "Use empty string for unavailable fields."
     )
 
-    safe_mime = _normalized_mime_type(mime_type)
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    # Try OpenRouter first if configured. If it returns anything (ok or error),
+    # stop and return that result to avoid falling back to Gemini quotas.
+    if OPENROUTER_API_KEY:
+        or_result = _call_openrouter(prompt, image_b64, safe_mime)
+        if or_result:
+            return or_result
+
+    if not GEMINI_API_KEY:
+        return {"error": "GEMINI_API_KEY is not configured on backend."}
+
     payload = {
         "contents": [
             {
