@@ -12,11 +12,15 @@ from services.medicine_service import get_medicine, get_medicine_by_barcode
 from services.ocr_service import extract_medicine_details_from_image
 from services.secure_store_service import (
     add_patient_for_caregiver,
+    clear_medicine_history,
+    delete_medicine,
     get_current_user,
     get_recent_reminder_logs,
     get_user_profile,
     list_caregiver_patients,
     list_medicines,
+    list_today_pending_medicines,
+    mark_medicine_taken,
     save_medicine,
     set_user_phone,
     set_user_role,
@@ -112,6 +116,26 @@ def secure_save_medicine(payload: MedicinePayload, user=Depends(get_current_user
 @app.get("/secure/medicines")
 def secure_list_medicines(user=Depends(get_current_user)):
     return list_medicines(user)
+
+
+@app.get("/secure/medicines/pending-today")
+def secure_list_today_pending_medicines(user=Depends(get_current_user)):
+    return list_today_pending_medicines(user)
+
+
+@app.post("/secure/medicines/{medicine_id}/taken")
+def secure_mark_medicine_taken(medicine_id: str, user=Depends(get_current_user)):
+    return mark_medicine_taken(user, medicine_id)
+
+
+@app.delete("/secure/medicines/history")
+def secure_clear_medicine_history(user=Depends(get_current_user)):
+    return clear_medicine_history(user)
+
+
+@app.delete("/secure/medicines/{medicine_id}")
+def secure_delete_medicine(medicine_id: str, user=Depends(get_current_user)):
+    return delete_medicine(user, medicine_id)
 
 
 @app.post("/secure/reminders/run")

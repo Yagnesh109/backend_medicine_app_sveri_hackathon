@@ -1,8 +1,10 @@
 import json
 import secrets
 import string
+from datetime import datetime, timedelta
 from os import getenv
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import firebase_admin
 from cryptography.fernet import Fernet, InvalidToken
@@ -46,6 +48,8 @@ _enc_key = getenv("DATA_ENCRYPTION_KEY")
 if not _enc_key:
     raise RuntimeError("DATA_ENCRYPTION_KEY is required.")
 _fernet = Fernet(_enc_key.encode("utf-8"))
+APP_TIMEZONE = getenv("APP_TIMEZONE", "Asia/Kolkata")
+DOSE_PENDING_WINDOW_MINUTES = 5
 
 
 def _encrypt_text(value):
@@ -85,6 +89,146 @@ def _get_user_profile_by_uid(uid):
     if not doc.exists:
         return {}
     return _decrypt_payload(doc.to_dict().get("dataEnc"))
+
+
+def _app_now():
+    return datetime.now(ZoneInfo(APP_TIMEZONE))
+
+
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_medicine_active_on_date(medicine, target_date):
+    start_date = str(medicine.get("startDate") or "").strip()
+    end_date = str(medicine.get("endDate") or "").strip()
+    if not start_date or not end_date:
+        return False
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return start <= target_date <= end
+
+
+def _get_scheduled_datetime_for_date(medicine, target_date):
+    hour = _safe_int(medicine.get("timeHour"))
+    minute = _safe_int(medicine.get("timeMinute"))
+    if hour is None or minute is None or hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return datetime(
+        year=target_date.year,
+        month=target_date.month,
+        day=target_date.day,
+        hour=hour,
+        minute=minute,
+        tzinfo=ZoneInfo(APP_TIMEZONE),
+    )
+
+
+def _dose_doc_id(user_id, medicine_id, target_date, hour, minute):
+    date_key = target_date.strftime("%Y%m%d")
+    time_key = f"{hour:02d}{minute:02d}"
+    return f"{user_id}_{medicine_id}_{date_key}_{time_key}"
+
+
+def _dose_status_collection():
+    return _db.collection("medicine_dose_status")
+
+
+def _get_dose_status_doc(user_id, medicine_id, target_date, hour, minute):
+    doc_id = _dose_doc_id(user_id, medicine_id, target_date, hour, minute)
+    return _dose_status_collection().document(doc_id).get()
+
+
+def _set_dose_status(user_id, medicine_id, target_date, hour, minute, status, source):
+    doc_id = _dose_doc_id(user_id, medicine_id, target_date, hour, minute)
+    _dose_status_collection().document(doc_id).set(
+        {
+            "userId": user_id,
+            "medicineId": medicine_id,
+            "scheduledDate": target_date.strftime("%Y-%m-%d"),
+            "scheduledTime": f"{hour:02d}:{minute:02d}",
+            "status": status,
+            "source": source,
+            "markedAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+
+def _get_status_map_for_user_on_date(user_id, scheduled_date):
+    docs = (
+        _dose_status_collection()
+        .where("userId", "==", user_id)
+        .where("scheduledDate", "==", scheduled_date)
+        .stream()
+    )
+    mapping = {}
+    for doc in docs:
+        data = doc.to_dict()
+        medicine_id = str(data.get("medicineId") or "").strip()
+        if not medicine_id:
+            continue
+        mapping[medicine_id] = str(data.get("status") or "").strip()
+    return mapping
+
+
+def _delete_dose_status_docs_for_medicine(user_id, medicine_id):
+    docs = (
+        _dose_status_collection()
+        .where("userId", "==", user_id)
+        .where("medicineId", "==", medicine_id)
+        .stream()
+    )
+    for doc in docs:
+        doc.reference.delete()
+
+
+def _mark_missed_doses_for_user(user_id, now=None):
+    current = now or _app_now()
+    target_date = current.date()
+    medicines = get_user_medicines_decrypted(user_id)
+    for medicine in medicines:
+        medicine_id = str(medicine.get("id") or "").strip()
+        if not medicine_id:
+            continue
+        if not _is_medicine_active_on_date(medicine, target_date):
+            continue
+        scheduled = _get_scheduled_datetime_for_date(medicine, target_date)
+        if scheduled is None:
+            continue
+
+        cutoff = scheduled + timedelta(minutes=DOSE_PENDING_WINDOW_MINUTES)
+        if current <= cutoff:
+            continue
+
+        hour = _safe_int(medicine.get("timeHour"))
+        minute = _safe_int(medicine.get("timeMinute"))
+        if hour is None or minute is None:
+            continue
+
+        status_doc = _get_dose_status_doc(user_id, medicine_id, target_date, hour, minute)
+        if status_doc.exists:
+            continue
+        _set_dose_status(
+            user_id,
+            medicine_id,
+            target_date,
+            hour,
+            minute,
+            "Missed",
+            "auto-timeout",
+        )
+
+
+def sync_missed_doses_for_user(user_id):
+    _mark_missed_doses_for_user(user_id, _app_now())
 
 
 def get_current_user(
@@ -246,6 +390,8 @@ def save_medicine(user, payload):
 def list_medicines(user):
     caller_profile = get_user_profile(user)
     caller_role = str(caller_profile.get("role") or "").strip()
+    now = _app_now()
+    scheduled_date = now.strftime("%Y-%m-%d")
 
     if caller_role == "Caregiver":
         links = (
@@ -255,18 +401,21 @@ def list_medicines(user):
         )
 
         patient_relation_map = {}
+        patient_profile_map = {}
         for link in links:
             link_data = link.to_dict()
             patient_id = str(link_data.get("patientId") or "").strip()
             if not patient_id:
                 continue
             patient_relation_map[patient_id] = str(link_data.get("relation") or "").strip()
+            patient_profile_map[patient_id] = _get_user_profile_by_uid(patient_id)
 
         patient_ids = list(patient_relation_map.keys())
         if not patient_ids:
             return {"items": []}
 
         rows = []
+        status_cache = {}
         for idx in range(0, len(patient_ids), 10):
             chunk = patient_ids[idx:idx + 10]
             docs = _db.collection("medicines_secure").where("userId", "in", chunk).stream()
@@ -276,6 +425,17 @@ def list_medicines(user):
                 data = _decrypt_payload(raw.get("dataEnc"))
                 data["id"] = doc.id
                 data["patientRelation"] = patient_relation_map.get(owner_user_id, "")
+                owner_profile = patient_profile_map.get(owner_user_id) or {}
+                data["patientUserId"] = owner_user_id
+                data["patientEmail"] = owner_profile.get("email")
+                data["patientName"] = owner_profile.get("displayName")
+                if owner_user_id not in status_cache:
+                    _mark_missed_doses_for_user(owner_user_id, now)
+                    status_cache[owner_user_id] = _get_status_map_for_user_on_date(
+                        owner_user_id,
+                        scheduled_date,
+                    )
+                data["todayStatus"] = status_cache[owner_user_id].get(doc.id, "")
                 created_at = raw.get("createdAt")
                 data["_createdAtTs"] = (
                     created_at.timestamp() if hasattr(created_at, "timestamp") else 0.0
@@ -292,11 +452,14 @@ def list_medicines(user):
         .where("userId", "==", user["uid"])
         .stream()
     )
+    _mark_missed_doses_for_user(user["uid"], now)
+    today_status_map = _get_status_map_for_user_on_date(user["uid"], scheduled_date)
     rows = []
     for doc in docs:
         raw = doc.to_dict()
         data = _decrypt_payload(raw.get("dataEnc"))
         data["id"] = doc.id
+        data["todayStatus"] = today_status_map.get(doc.id, "")
         created_at = raw.get("createdAt")
         data["_createdAtTs"] = (
             created_at.timestamp() if hasattr(created_at, "timestamp") else 0.0
@@ -307,6 +470,188 @@ def list_medicines(user):
     for row in rows:
         row.pop("_createdAtTs", None)
     return {"items": rows}
+
+
+def delete_medicine(user, medicine_id):
+    medicine_id_value = str(medicine_id or "").strip()
+    if not medicine_id_value:
+        return {"error": "Medicine id is required."}
+
+    doc_ref = _db.collection("medicines_secure").document(medicine_id_value)
+    doc = doc_ref.get()
+    if not doc.exists:
+        return {"error": "Medicine not found."}
+
+    raw = doc.to_dict()
+    owner_user_id = str(raw.get("userId") or "").strip()
+    role = str(get_user_profile(user).get("role") or "").strip()
+    can_delete = owner_user_id == user["uid"]
+    if not can_delete and role == "Caregiver":
+        can_delete = _is_caregiver_linked_to_patient(user["uid"], owner_user_id)
+    if not can_delete:
+        return {"error": "Not allowed to delete this medicine."}
+
+    doc_ref.delete()
+    _delete_dose_status_docs_for_medicine(owner_user_id, medicine_id_value)
+    return {"ok": True}
+
+
+def clear_medicine_history(user):
+    role = str(get_user_profile(user).get("role") or "").strip()
+    if role not in {"Patient", "Caregiver"}:
+        return {"error": "Clear history is available for Patient or Caregiver only."}
+
+    target_user_ids = []
+    if role == "Patient":
+        target_user_ids = [user["uid"]]
+    else:
+        links = (
+            _db.collection("caregiver_patient_links")
+            .where("caregiverId", "==", user["uid"])
+            .stream()
+        )
+        for link in links:
+            link_data = link.to_dict()
+            patient_id = str(link_data.get("patientId") or "").strip()
+            if patient_id:
+                target_user_ids.append(patient_id)
+
+    target_user_ids = list(dict.fromkeys(target_user_ids))
+    if not target_user_ids:
+        return {"ok": True, "deletedMedicines": 0}
+
+    deleted_medicine_ids = []
+    deleted_count = 0
+    for idx in range(0, len(target_user_ids), 10):
+        chunk = target_user_ids[idx:idx + 10]
+        docs = _db.collection("medicines_secure").where("userId", "in", chunk).stream()
+        for doc in docs:
+            deleted_medicine_ids.append((str(doc.to_dict().get("userId") or ""), doc.id))
+            doc.reference.delete()
+            deleted_count += 1
+
+    for owner_user_id, medicine_id in deleted_medicine_ids:
+        if owner_user_id and medicine_id:
+            _delete_dose_status_docs_for_medicine(owner_user_id, medicine_id)
+
+    return {"ok": True, "deletedMedicines": deleted_count}
+
+
+def list_today_pending_medicines(user):
+    profile = get_user_profile(user)
+    role = str(profile.get("role") or "").strip()
+    if role != "Patient":
+        return {"items": []}
+
+    now = _app_now()
+    target_date = now.date()
+    _mark_missed_doses_for_user(user["uid"], now)
+
+    items = []
+    medicines = get_user_medicines_decrypted(user["uid"])
+    for medicine in medicines:
+        medicine_id = str(medicine.get("id") or "").strip()
+        if not medicine_id:
+            continue
+        if not _is_medicine_active_on_date(medicine, target_date):
+            continue
+
+        hour = _safe_int(medicine.get("timeHour"))
+        minute = _safe_int(medicine.get("timeMinute"))
+        if hour is None or minute is None:
+            continue
+
+        scheduled = _get_scheduled_datetime_for_date(medicine, target_date)
+        if scheduled is None:
+            continue
+        window_end = scheduled + timedelta(minutes=DOSE_PENDING_WINDOW_MINUTES)
+        if now < scheduled or now > window_end:
+            continue
+
+        status_doc = _get_dose_status_doc(user["uid"], medicine_id, target_date, hour, minute)
+        if status_doc.exists:
+            status_value = str(status_doc.to_dict().get("status") or "").strip()
+            if status_value in {"Taken", "Missed"}:
+                continue
+
+        items.append(
+            {
+                "medicineId": medicine_id,
+                "medicineName": medicine.get("medicineName"),
+                "dosage": medicine.get("dosage"),
+                "startDate": medicine.get("startDate"),
+                "timeHour": hour,
+                "timeMinute": minute,
+                "windowEndAt": window_end.isoformat(),
+            }
+        )
+
+    items.sort(
+        key=lambda item: (
+            _safe_int(item.get("timeHour")) or 0,
+            _safe_int(item.get("timeMinute")) or 0,
+        )
+    )
+    return {"items": items}
+
+
+def mark_medicine_taken(user, medicine_id):
+    profile = get_user_profile(user)
+    role = str(profile.get("role") or "").strip()
+    if role != "Patient":
+        return {"error": "Only Patient can mark medicine as taken."}
+
+    medicine_id_value = str(medicine_id or "").strip()
+    if not medicine_id_value:
+        return {"error": "Medicine id is required."}
+
+    doc = _db.collection("medicines_secure").document(medicine_id_value).get()
+    if not doc.exists:
+        return {"error": "Medicine not found."}
+    raw = doc.to_dict()
+    owner_user_id = str(raw.get("userId") or "").strip()
+    if owner_user_id != user["uid"]:
+        return {"error": "You can only mark your own medicine as taken."}
+
+    medicine = _decrypt_payload(raw.get("dataEnc"))
+    now = _app_now()
+    target_date = now.date()
+    if not _is_medicine_active_on_date(medicine, target_date):
+        return {"error": "Medicine is not scheduled for today."}
+
+    hour = _safe_int(medicine.get("timeHour"))
+    minute = _safe_int(medicine.get("timeMinute"))
+    if hour is None or minute is None:
+        return {"error": "Invalid medicine time."}
+
+    scheduled = _get_scheduled_datetime_for_date(medicine, target_date)
+    if scheduled is None:
+        return {"error": "Invalid medicine schedule."}
+    window_end = scheduled + timedelta(minutes=DOSE_PENDING_WINDOW_MINUTES)
+    if now < scheduled:
+        return {"error": "You can mark as taken only from reminder time."}
+    if now > window_end:
+        _mark_missed_doses_for_user(user["uid"], now)
+        return {"error": "Marked as missed (time window exceeded)."}
+
+    status_doc = _get_dose_status_doc(user["uid"], medicine_id_value, target_date, hour, minute)
+    if status_doc.exists:
+        status_value = str(status_doc.to_dict().get("status") or "").strip()
+        if status_value == "Taken":
+            return {"ok": True, "status": "Taken"}
+        if status_value == "Missed":
+            return {"error": "Medicine already marked as missed."}
+
+    _set_dose_status(
+        user["uid"],
+        medicine_id_value,
+        target_date,
+        hour,
+        minute,
+        "Taken",
+        "patient-button",
+    )
+    return {"ok": True, "status": "Taken"}
 
 
 def get_all_users_decrypted():

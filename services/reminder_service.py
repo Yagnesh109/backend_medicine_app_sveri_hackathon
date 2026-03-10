@@ -11,6 +11,7 @@ from services.secure_store_service import (
     get_user_medicines_decrypted,
     mark_reminder_sent,
     reminder_was_sent,
+    sync_missed_doses_for_user,
 )
 
 TWILIO_ACCOUNT_SID = getenv("TWILIO_ACCOUNT_SID")
@@ -145,6 +146,9 @@ def run_due_reminders():
         role = str(user.get("role") or "").strip()
         if role != "Patient":
             continue
+
+        # Keep patient dose status in sync even when app is not open.
+        sync_missed_doses_for_user(user.get("userId"))
 
         phone = _normalize_phone(user.get("phoneNumber"))
         if not phone:
