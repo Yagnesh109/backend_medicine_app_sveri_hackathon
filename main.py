@@ -11,9 +11,11 @@ load_dotenv()
 from services.medicine_service import get_medicine, get_medicine_by_barcode
 from services.ocr_service import extract_medicine_details_from_image
 from services.secure_store_service import (
+    add_patient_for_caregiver,
     get_current_user,
     get_recent_reminder_logs,
     get_user_profile,
+    list_caregiver_patients,
     list_medicines,
     save_medicine,
     set_user_phone,
@@ -41,10 +43,16 @@ class MedicinePayload(BaseModel):
     mealType: str
     mealRelation: str
     source: str | None = None
+    targetPatientId: str | None = None
 
 
 class PhonePayload(BaseModel):
     phoneNumber: str
+
+
+class CaregiverAddPatientPayload(BaseModel):
+    patientEmail: str
+    patientPhoneNumber: str
 
 @app.get("/medicine")
 def medicine(name: str):
@@ -75,6 +83,19 @@ def secure_user_role(payload: RolePayload, user=Depends(get_current_user)):
 @app.post("/secure/user/phone")
 def secure_user_phone(payload: PhonePayload, user=Depends(get_current_user)):
     return set_user_phone(user, payload.phoneNumber)
+
+
+@app.post("/secure/caregiver/patients")
+def secure_add_patient_for_caregiver(
+    payload: CaregiverAddPatientPayload,
+    user=Depends(get_current_user),
+):
+    return add_patient_for_caregiver(user, payload.patientEmail, payload.patientPhoneNumber)
+
+
+@app.get("/secure/caregiver/patients")
+def secure_list_caregiver_patients(user=Depends(get_current_user)):
+    return list_caregiver_patients(user)
 
 
 @app.post("/secure/medicine")

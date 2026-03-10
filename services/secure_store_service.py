@@ -74,6 +74,17 @@ def _decrypt_payload(value):
         return {}
 
 
+def _get_user_secure_doc(uid):
+    return _db.collection("users_secure").document(uid)
+
+
+def _get_user_profile_by_uid(uid):
+    doc = _get_user_secure_doc(uid).get()
+    if not doc.exists:
+        return {}
+    return _decrypt_payload(doc.to_dict().get("dataEnc"))
+
+
 def get_current_user(
     authorization: str = Header(default=None),
 ):
@@ -106,11 +117,8 @@ def set_user_role(user, role):
     if role_value not in {"Patient", "Caregiver", "Doctor"}:
         return {"error": "Invalid role value."}
 
-    doc_ref = _db.collection("users_secure").document(user["uid"])
-    existing = doc_ref.get()
-    existing_data = {}
-    if existing.exists:
-        existing_data = _decrypt_payload(existing.to_dict().get("dataEnc"))
+    doc_ref = _get_user_secure_doc(user["uid"])
+    existing_data = _get_user_profile_by_uid(user["uid"])
 
     payload = {
         "role": role_value,
@@ -138,11 +146,8 @@ def set_user_phone(user, phone_number):
     if not phone_value:
         return {"error": "Phone number is required."}
 
-    doc_ref = _db.collection("users_secure").document(user["uid"])
-    existing = doc_ref.get()
-    existing_data = {}
-    if existing.exists:
-        existing_data = _decrypt_payload(existing.to_dict().get("dataEnc"))
+    doc_ref = _get_user_secure_doc(user["uid"])
+    existing_data = _get_user_profile_by_uid(user["uid"])
 
     payload = {
         "role": existing_data.get("role"),
@@ -166,13 +171,9 @@ def set_user_phone(user, phone_number):
 
 
 def get_user_profile(user):
-    doc_ref = _db.collection("users_secure").document(user["uid"])
-    snapshot = doc_ref.get()
-    if not snapshot.exists:
+    data = _get_user_profile_by_uid(user["uid"])
+    if not data:
         return {"role": None}
-
-    enc = snapshot.to_dict().get("dataEnc")
-    data = _decrypt_payload(enc)
     return {
         "role": data.get("role"),
         "email": data.get("email"),
@@ -182,12 +183,29 @@ def get_user_profile(user):
     }
 
 
+def _is_caregiver_linked_to_patient(caregiver_id, patient_id):
+    link_id = f"{caregiver_id}_{patient_id}"
+    return _db.collection("caregiver_patient_links").document(link_id).get().exists
+
+
 def save_medicine(user, payload):
+    target_patient_id = str(payload.get("targetPatientId") or "").strip()
+    owner_user_id = user["uid"]
+
+    if target_patient_id and target_patient_id != user["uid"]:
+        caller_profile = get_user_profile(user)
+        if caller_profile.get("role") != "Caregiver":
+            return {"error": "Only caregiver can save medicine for another patient."}
+        if not _is_caregiver_linked_to_patient(user["uid"], target_patient_id):
+            return {"error": "Selected patient is not linked to this caregiver."}
+        owner_user_id = target_patient_id
+
     encrypted_payload = _encrypt_payload(payload)
     doc_ref = _db.collection("medicines_secure").document()
     doc_ref.set(
         {
-            "userId": user["uid"],
+            "userId": owner_user_id,
+            "createdByUserId": user["uid"],
             "dataEnc": encrypted_payload,
             "createdAt": firestore.SERVER_TIMESTAMP,
         }
@@ -269,3 +287,101 @@ def get_recent_reminder_logs(limit=50):
         raw["id"] = doc.id
         rows.append(raw)
     return rows
+
+
+def add_patient_for_caregiver(user, patient_email, patient_phone):
+    caller_profile = get_user_profile(user)
+    if caller_profile.get("role") != "Caregiver":
+        return {"error": "Only caregiver can add patients."}
+
+    email = str(patient_email or "").strip().lower()
+    if not email:
+        return {"error": "Patient email is required."}
+
+    try:
+        patient_auth = auth.get_user_by_email(email)
+    except Exception:
+        return {"error": "No Firebase user found with this patient email."}
+
+    patient_id = patient_auth.uid
+    if patient_id == user["uid"]:
+        return {"error": "Caregiver cannot add self as patient."}
+
+    patient_profile = _get_user_profile_by_uid(patient_id)
+    role = str(patient_profile.get("role") or "").strip()
+    if role and role != "Patient":
+        return {"error": "Selected user role is not Patient."}
+
+    phone = str(patient_phone or "").strip()
+    payload = {
+        "role": "Patient",
+        "email": patient_auth.email or email,
+        "displayName": patient_auth.display_name,
+        "photoURL": patient_auth.photo_url,
+        "phoneNumber": phone or patient_profile.get("phoneNumber", ""),
+    }
+
+    _get_user_secure_doc(patient_id).set(
+        {
+            "userId": patient_id,
+            "dataEnc": _encrypt_payload(payload),
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+    link_id = f"{user['uid']}_{patient_id}"
+    _db.collection("caregiver_patient_links").document(link_id).set(
+        {
+            "caregiverId": user["uid"],
+            "patientId": patient_id,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+    return {
+        "ok": True,
+        "patient": {
+            "userId": patient_id,
+            "email": payload.get("email"),
+            "displayName": payload.get("displayName"),
+            "phoneNumber": payload.get("phoneNumber"),
+            "role": "Patient",
+        },
+    }
+
+
+def list_caregiver_patients(user):
+    caller_profile = get_user_profile(user)
+    if caller_profile.get("role") != "Caregiver":
+        return {"items": []}
+
+    links = (
+        _db.collection("caregiver_patient_links")
+        .where("caregiverId", "==", user["uid"])
+        .stream()
+    )
+
+    items = []
+    for link in links:
+        link_data = link.to_dict()
+        patient_id = link_data.get("patientId")
+        if not patient_id:
+            continue
+        patient_profile = _get_user_profile_by_uid(patient_id)
+        if not patient_profile:
+            continue
+        items.append(
+            {
+                "userId": patient_id,
+                "email": patient_profile.get("email"),
+                "displayName": patient_profile.get("displayName"),
+                "phoneNumber": patient_profile.get("phoneNumber"),
+                "role": patient_profile.get("role"),
+            }
+        )
+
+    return {"items": items}

@@ -11,6 +11,8 @@ serviceAccountKey.json
 firebase-adminsdk-*.json
 *credentials*.json
 *secret*.json
+*token*.json
+*token*.txt
 credentials.json
 *.pem
 *.key
@@ -29,13 +31,27 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 .venv/
 venv/
+.python-version
+
+# Python packaging/build outputs
+build/
+dist/
+site/
+pip-wheel-metadata/
+*.egg-info/
 
 # Logs and local DB
 *.log
 *.sqlite3
 *.db
+.coverage
+.coverage.*
+htmlcov/
 
 # IDE / OS and local artifacts
 .idea/
@@ -43,3 +59,6 @@ venv/
 .DS_Store
 Thumbs.db
 *.zip
+*.backup
+*.secret
+*.secrets
