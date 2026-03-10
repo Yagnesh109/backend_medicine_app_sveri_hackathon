@@ -22,6 +22,7 @@ def _extract_json_from_text(text):
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
+        # Try to find first JSON object substring.
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start == -1 or end == -1 or end <= start:
@@ -81,10 +82,10 @@ def _pick_fallback_model(available, preferred):
     # Common model aliases across versions; we'll pick the first one that exists.
     preference_order = [
         preferred_value,
-        "gemini-2.5-flash",
-        "gemini-1.5-flash-latest",
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-1.5-flash-latest",
         "gemini-1.5-pro-latest",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
@@ -152,6 +153,7 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
         "generationConfig": {
             "temperature": 0.2,
             "maxOutputTokens": 512,
+            # responseMimeType is only supported on v1; for v1beta we strip it below.
             "responseMimeType": "application/json",
         },
     }
@@ -160,6 +162,7 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
     api_versions = [GEMINI_API_VERSION]
     if GEMINI_API_VERSION != "v1":
         api_versions.append("v1")
+    # v1beta last resort to avoid incompatible behaviors unless nothing else works.
     if GEMINI_API_VERSION != "v1beta":
         api_versions.append("v1beta")
 
@@ -167,8 +170,17 @@ def extract_medicine_details_from_image(image_bytes, mime_type):
     for api_version in api_versions:
         available = _try_list_models(api_version, GEMINI_API_KEY)
         model_to_use = _pick_fallback_model(available, GEMINI_MODEL)
+
+        # Build payload per version: drop responseMimeType for v1beta to avoid API errors,
+        # but keep it for v1 to encourage structured JSON.
+        request_payload = dict(payload)
+        if api_version == "v1beta":
+            gen_cfg = dict(request_payload.get("generationConfig") or {})
+            gen_cfg.pop("responseMimeType", None)
+            request_payload["generationConfig"] = gen_cfg
+
         try:
-            response = _post_gemini_generate(api_version, model_to_use, GEMINI_API_KEY, payload)
+            response = _post_gemini_generate(api_version, model_to_use, GEMINI_API_KEY, request_payload)
         except requests.RequestException as exc:
             last_error = f"Gemini request failed ({api_version}/{model_to_use}): {exc}"
             continue
