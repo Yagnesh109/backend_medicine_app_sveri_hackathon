@@ -319,7 +319,7 @@ def get_recent_reminder_logs(limit=50):
     return rows
 
 
-def add_patient_for_caregiver(user, patient_email, patient_phone):
+def add_patient_for_caregiver(user, patient_email, patient_phone, patient_relation):
     caller_profile = get_user_profile(user)
     if caller_profile.get("role") != "Caregiver":
         return {"error": "Only caregiver can add patients."}
@@ -327,6 +327,9 @@ def add_patient_for_caregiver(user, patient_email, patient_phone):
     email = str(patient_email or "").strip().lower()
     if not email:
         return {"error": "Patient email is required."}
+    relation = str(patient_relation or "").strip()
+    if not relation:
+        return {"error": "Patient relation is required."}
 
     try:
         patient_auth, was_auto_created = _get_or_create_patient_auth_user(email)
@@ -366,6 +369,7 @@ def add_patient_for_caregiver(user, patient_email, patient_phone):
         {
             "caregiverId": user["uid"],
             "patientId": patient_id,
+            "relation": relation,
             "createdAt": firestore.SERVER_TIMESTAMP,
             "updatedAt": firestore.SERVER_TIMESTAMP,
         },
@@ -381,6 +385,7 @@ def add_patient_for_caregiver(user, patient_email, patient_phone):
             "displayName": payload.get("displayName"),
             "phoneNumber": payload.get("phoneNumber"),
             "role": "Patient",
+            "relation": relation,
         },
     }
 
@@ -404,10 +409,15 @@ def list_caregiver_patients(user):
             continue
         updated_at = link_data.get("updatedAt")
         sort_key = updated_at.timestamp() if hasattr(updated_at, "timestamp") else 0.0
-        patient_rows.append((sort_key, patient_id))
+        relation = str(link_data.get("relation") or "").strip()
+        patient_rows.append((sort_key, patient_id, relation))
 
     items = []
-    for _, patient_id in sorted(patient_rows, key=lambda row: row[0], reverse=True):
+    for _, patient_id, relation in sorted(
+        patient_rows,
+        key=lambda row: row[0],
+        reverse=True,
+    ):
         patient_profile = _get_user_profile_by_uid(patient_id)
         if not patient_profile:
             continue
@@ -418,6 +428,7 @@ def list_caregiver_patients(user):
                 "displayName": patient_profile.get("displayName"),
                 "phoneNumber": patient_profile.get("phoneNumber"),
                 "role": patient_profile.get("role"),
+                "relation": relation,
             }
         )
 

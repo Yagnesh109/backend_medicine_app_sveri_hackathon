@@ -53,6 +53,7 @@ class PhonePayload(BaseModel):
 class CaregiverAddPatientPayload(BaseModel):
     patientEmail: str
     patientPhoneNumber: str
+    patientRelation: str
 
 @app.get("/medicine")
 def medicine(name: str):
@@ -90,7 +91,12 @@ def secure_add_patient_for_caregiver(
     payload: CaregiverAddPatientPayload,
     user=Depends(get_current_user),
 ):
-    return add_patient_for_caregiver(user, payload.patientEmail, payload.patientPhoneNumber)
+    return add_patient_for_caregiver(
+        user,
+        payload.patientEmail,
+        payload.patientPhoneNumber,
+        payload.patientRelation,
+    )
 
 
 @app.get("/secure/caregiver/patients")
