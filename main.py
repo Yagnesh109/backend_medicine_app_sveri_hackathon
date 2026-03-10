@@ -13,6 +13,7 @@ from services.ocr_service import extract_medicine_details_from_image
 from services.secure_store_service import (
     add_patient_for_caregiver,
     clear_medicine_history,
+    delete_patient_for_caregiver,
     delete_medicine,
     get_current_user,
     get_recent_reminder_logs,
@@ -106,6 +107,11 @@ def secure_add_patient_for_caregiver(
 @app.get("/secure/caregiver/patients")
 def secure_list_caregiver_patients(user=Depends(get_current_user)):
     return list_caregiver_patients(user)
+
+
+@app.delete("/secure/caregiver/patients/{patient_id}")
+def secure_delete_patient_for_caregiver(patient_id: str, user=Depends(get_current_user)):
+    return delete_patient_for_caregiver(user, patient_id)
 
 
 @app.post("/secure/medicine")

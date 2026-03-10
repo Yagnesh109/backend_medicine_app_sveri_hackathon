@@ -829,3 +829,23 @@ def list_caregiver_patients(user):
         )
 
     return {"items": items}
+
+
+def delete_patient_for_caregiver(user, patient_id):
+    caller_profile = get_user_profile(user)
+    if caller_profile.get("role") != "Caregiver":
+        return {"error": "Only caregiver can delete patients."}
+
+    patient_id_value = str(patient_id or "").strip()
+    if not patient_id_value:
+        return {"error": "Patient id is required."}
+    if patient_id_value == user["uid"]:
+        return {"error": "Caregiver cannot delete self."}
+
+    link_id = f"{user['uid']}_{patient_id_value}"
+    link_ref = _db.collection("caregiver_patient_links").document(link_id)
+    if not link_ref.get().exists:
+        return {"error": "Patient is not linked to this caregiver."}
+
+    link_ref.delete()
+    return {"ok": True}
