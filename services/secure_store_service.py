@@ -244,6 +244,49 @@ def save_medicine(user, payload):
 
 
 def list_medicines(user):
+    caller_profile = get_user_profile(user)
+    caller_role = str(caller_profile.get("role") or "").strip()
+
+    if caller_role == "Caregiver":
+        links = (
+            _db.collection("caregiver_patient_links")
+            .where("caregiverId", "==", user["uid"])
+            .stream()
+        )
+
+        patient_relation_map = {}
+        for link in links:
+            link_data = link.to_dict()
+            patient_id = str(link_data.get("patientId") or "").strip()
+            if not patient_id:
+                continue
+            patient_relation_map[patient_id] = str(link_data.get("relation") or "").strip()
+
+        patient_ids = list(patient_relation_map.keys())
+        if not patient_ids:
+            return {"items": []}
+
+        rows = []
+        for idx in range(0, len(patient_ids), 10):
+            chunk = patient_ids[idx:idx + 10]
+            docs = _db.collection("medicines_secure").where("userId", "in", chunk).stream()
+            for doc in docs:
+                raw = doc.to_dict()
+                owner_user_id = str(raw.get("userId") or "").strip()
+                data = _decrypt_payload(raw.get("dataEnc"))
+                data["id"] = doc.id
+                data["patientRelation"] = patient_relation_map.get(owner_user_id, "")
+                created_at = raw.get("createdAt")
+                data["_createdAtTs"] = (
+                    created_at.timestamp() if hasattr(created_at, "timestamp") else 0.0
+                )
+                rows.append(data)
+
+        rows.sort(key=lambda row: row.get("_createdAtTs", 0.0), reverse=True)
+        for row in rows:
+            row.pop("_createdAtTs", None)
+        return {"items": rows}
+
     docs = (
         _db.collection("medicines_secure")
         .where("userId", "==", user["uid"])
@@ -254,7 +297,15 @@ def list_medicines(user):
         raw = doc.to_dict()
         data = _decrypt_payload(raw.get("dataEnc"))
         data["id"] = doc.id
+        created_at = raw.get("createdAt")
+        data["_createdAtTs"] = (
+            created_at.timestamp() if hasattr(created_at, "timestamp") else 0.0
+        )
         rows.append(data)
+
+    rows.sort(key=lambda row: row.get("_createdAtTs", 0.0), reverse=True)
+    for row in rows:
+        row.pop("_createdAtTs", None)
     return {"items": rows}
 
 
